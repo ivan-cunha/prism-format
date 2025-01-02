@@ -17,8 +17,8 @@ type ColumnSchema struct {
 type FileSchema struct {
 	Version     uint16         `json:"version"`
 	Columns     []ColumnSchema `json:"columns"`
-	Created     int64          `json:"created"`  // Unix timestamp
-	Modified    int64          `json:"modified"` // Unix timestamp
+	Created     int64          `json:"created"`
+	Modified    int64          `json:"modified"`
 	Description string         `json:"description,omitempty"`
 }
 
@@ -30,7 +30,6 @@ func New() *FileSchema {
 }
 
 func (s *FileSchema) AddColumn(name string, dataType types.DataType, nullable bool) error {
-	// Validate column name uniqueness
 	for _, col := range s.Columns {
 		if col.Name == name {
 			return fmt.Errorf("column name %s already exists", name)

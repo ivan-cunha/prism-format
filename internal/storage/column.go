@@ -10,9 +10,9 @@ type ColumnMetadata struct {
 	Offset         int64
 	Length         int64
 	CompressedSize int64
-	MinValue       interface{}
-	MaxValue       interface{}
 	NullCount      int64
+	// Remove MinValue and MaxValue as they're interface{} types
+	// We'll handle statistics separately if needed
 }
 
 type ColumnBlock struct {

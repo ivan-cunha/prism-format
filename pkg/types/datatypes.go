@@ -1,6 +1,8 @@
 package types
 
-type DataType int
+import "encoding/json"
+
+type DataType uint8
 
 const (
 	Int32Type DataType = iota
@@ -30,6 +32,14 @@ type Column struct {
 	Description  string      // Documentation
 }
 
-// Add JSON marshaling methods for Schema
-func (s *Schema) MarshalJSON() ([]byte, error)
-func (s *Schema) UnmarshalJSON(data []byte) error
+type Schema struct {
+	Columns []Column
+}
+
+func (s Schema) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.Columns)
+}
+
+func (s *Schema) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, &s.Columns)
+}

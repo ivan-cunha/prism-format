@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -10,6 +11,22 @@ import (
 	"github.com/ivan-cunha/prism-format/internal/encoding"
 	"github.com/ivan-cunha/prism-format/pkg/types"
 )
+
+type FileInfo struct {
+	Version  uint16
+	Created  int64
+	Modified int64
+	Schema   types.Schema
+}
+
+func (r *Reader) GetFileInfo() (FileInfo, error) {
+	return FileInfo{
+		Version:  r.header.Version,
+		Created:  time.Now().Unix(),
+		Modified: time.Now().Unix(),
+		Schema:   r.schema,
+	}, nil
+}
 
 var (
 	ErrInvalidMagic   = errors.New("invalid magic number")
@@ -30,16 +47,26 @@ func NewReader(r io.ReadSeeker) (*Reader, error) {
 		columns: make(map[string]*ColumnBlock),
 	}
 
+	fmt.Println("Reading file header...")
 	if err := reader.readHeader(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read header: %v", err)
 	}
 
+	fmt.Printf("Reading schema (length=%d)...\n", reader.header.SchemaLen)
 	if err := reader.readSchema(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read schema: %v", err)
 	}
 
+	fmt.Printf("Reading column metadata for %d columns...\n", len(reader.schema.Columns))
+
+	// Get current position
+	pos, err := r.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current position: %v", err)
+	}
+	fmt.Printf("Starting to read column metadata at position: %d\n", pos)
 	if err := reader.readColumnMetadata(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read column metadata: %v", err)
 	}
 
 	return reader, nil
@@ -74,8 +101,37 @@ func (r *Reader) readSchema() error {
 
 func (r *Reader) readColumnMetadata() error {
 	for _, col := range r.schema.Columns {
-		metadata := ColumnMetadata{}
-		if err := binary.Read(r.r, binary.BigEndian, &metadata); err != nil {
+		var metadata ColumnMetadata
+
+		// Read type as uint8
+		var typeVal uint8
+		if err := binary.Read(r.r, binary.BigEndian, &typeVal); err != nil {
+			return err
+		}
+		metadata.Type = types.DataType(typeVal)
+
+		// Read name length and name
+		var nameLen uint32
+		if err := binary.Read(r.r, binary.BigEndian, &nameLen); err != nil {
+			return err
+		}
+		nameBytes := make([]byte, nameLen)
+		if _, err := r.r.Read(nameBytes); err != nil {
+			return err
+		}
+		metadata.Name = string(nameBytes)
+
+		// Read remaining fixed-size fields
+		if err := binary.Read(r.r, binary.BigEndian, &metadata.Offset); err != nil {
+			return err
+		}
+		if err := binary.Read(r.r, binary.BigEndian, &metadata.Length); err != nil {
+			return err
+		}
+		if err := binary.Read(r.r, binary.BigEndian, &metadata.CompressedSize); err != nil {
+			return err
+		}
+		if err := binary.Read(r.r, binary.BigEndian, &metadata.NullCount); err != nil {
 			return err
 		}
 

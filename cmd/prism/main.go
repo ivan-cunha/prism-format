@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ivan-cunha/prism-format/internal/schema"
 	"github.com/ivan-cunha/prism-format/internal/storage"
 	"github.com/ivan-cunha/prism-format/pkg/types"
+)
+
+const (
+	PrismExtension = ".prsm"
 )
 
 func main() {
@@ -42,10 +47,28 @@ func main() {
 	}
 }
 
+// ensurePrismExtension ensures the file has the .prsm extension
+func ensurePrismExtension(filename string) string {
+	if !strings.HasSuffix(strings.ToLower(filename), PrismExtension) {
+		return filename + PrismExtension
+	}
+	return filename
+}
+
+func validatePrismFile(filename string) error {
+	if !strings.HasSuffix(strings.ToLower(filename), PrismExtension) {
+		return fmt.Errorf("invalid file extension: file must have %s extension", PrismExtension)
+	}
+	return nil
+}
+
 func convertCSVToPrism(input, output string) error {
 	if input == "" || output == "" {
 		return fmt.Errorf("input and output files are required")
 	}
+
+	// Ensure output has .prsm extension
+	output = ensurePrismExtension(output)
 
 	// Open CSV file
 	csvFile, err := os.Open(input)
@@ -101,6 +124,11 @@ func convertCSVToPrism(input, output string) error {
 }
 
 func showPrismInfo(input string) error {
+	// Validate file extension
+	if err := validatePrismFile(input); err != nil {
+		return err
+	}
+
 	file, err := os.Open(input)
 	if err != nil {
 		return fmt.Errorf("error opening file: %v", err)
