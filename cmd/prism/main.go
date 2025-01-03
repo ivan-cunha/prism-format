@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/ivan-cunha/prism-format/internal/schema"
 	"github.com/ivan-cunha/prism-format/internal/storage"
-	"github.com/ivan-cunha/prism-format/pkg/types"
 )
 
 const (
@@ -77,18 +77,37 @@ func convertCSVToPrism(input, output string) error {
 	}
 	defer csvFile.Close()
 
-	// Read CSV header
+	// Create CSV reader with proper configuration
 	reader := csv.NewReader(csvFile)
+	reader.LazyQuotes = true
+	reader.TrimLeadingSpace = true
+
+	// Read headers
 	headers, err := reader.Read()
 	if err != nil {
 		return fmt.Errorf("error reading CSV header: %v", err)
 	}
 
-	// Create schema
+	// Validate headers
+	if err := validateHeaders(headers); err != nil {
+		return fmt.Errorf("invalid headers: %v", err)
+	}
+
+	// Infer column types with retry logic
+	columnTypes, err := storage.InferColumnTypesWithRetry(csvFile)
+	if err != nil {
+		return fmt.Errorf("error inferring column types: %v", err)
+	}
+
+	// Reset file position for reading data
+	if _, err := csvFile.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("error resetting file position: %v", err)
+	}
+
+	// Create schema with inferred types
 	fileSchema := schema.New()
-	for _, header := range headers {
-		// Default to string type for all columns
-		if err := fileSchema.AddColumn(header, types.StringType, true); err != nil {
+	for i, header := range headers {
+		if err := fileSchema.AddColumn(header, columnTypes[i], true); err != nil {
 			return fmt.Errorf("error adding column: %v", err)
 		}
 	}
@@ -100,29 +119,31 @@ func convertCSVToPrism(input, output string) error {
 	}
 	defer outFile.Close()
 
-	// Create writer
+	// Create writer and convert
 	writer := storage.NewWriter(outFile, fileSchema.ToSchema())
-
-	// Write data
-	rows, err := reader.ReadAll()
-	if err != nil {
-		return fmt.Errorf("error reading CSV data: %v", err)
+	if err := storage.ConvertWithRetry(csvFile, writer, fileSchema.ToSchema()); err != nil {
+		return fmt.Errorf("error during conversion: %v", err)
 	}
 
-	for _, row := range rows {
-		if err := writer.WriteRow(row); err != nil {
-			return fmt.Errorf("error writing row: %v", err)
-		}
-	}
-
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("error closing writer: %v", err)
-	}
-
-	fmt.Printf("Successfully converted %s to %s\n", input, output)
-	return nil
+	return writer.Close()
 }
 
+func validateHeaders(headers []string) error {
+	seen := make(map[string]bool)
+	for i, header := range headers {
+		// Check for empty headers
+		if strings.TrimSpace(header) == "" {
+			return fmt.Errorf("empty header at position %d", i)
+		}
+
+		// Check for duplicate headers
+		if seen[header] {
+			return fmt.Errorf("duplicate header: %s", header)
+		}
+		seen[header] = true
+	}
+	return nil
+}
 func showPrismInfo(input string) error {
 	// Validate file extension
 	if err := validatePrismFile(input); err != nil {
