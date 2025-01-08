@@ -79,33 +79,6 @@ func NewReader(r io.ReadSeeker) (*Reader, error) {
 	return reader, nil
 }
 
-func (r *Reader) readHeader() error {
-	header, err := encoding.ReadHeader(r.r)
-	if err != nil {
-		return err
-	}
-
-	if header.Magic != encoding.MagicNumber {
-		return ErrInvalidMagic
-	}
-
-	if header.Version > encoding.Version {
-		return ErrInvalidVersion
-	}
-
-	r.header = header
-	return nil
-}
-
-func (r *Reader) readSchema() error {
-	schemaBytes := make([]byte, r.header.SchemaLen)
-	if _, err := r.r.Read(schemaBytes); err != nil {
-		return err
-	}
-
-	return r.schema.UnmarshalJSON(schemaBytes)
-}
-
 func getCurrentOffset(r io.ReadSeeker) int64 {
 	offset, _ := r.Seek(0, io.SeekCurrent)
 	return offset
@@ -290,6 +263,11 @@ func (r *Reader) loadColumnData(col *ColumnBlock) error {
 		if err != nil {
 			compressor, err = compression.GetCompressor("snappy")
 		}
+	case types.BooleanType:
+		compressor, err = compression.GetCompressor("boolean")
+		if err != nil {
+			compressor, err = compression.GetCompressor("snappy")
+		}
 	default:
 		compressor, err = compression.GetCompressor("snappy")
 	}
@@ -391,11 +369,9 @@ func (r *Reader) decodeString(data []byte) ([]string, error) {
 }
 
 func (r *Reader) decodeBoolean(data []byte) ([]bool, error) {
-	result := make([]bool, len(data)*8)
+	result := make([]bool, len(data))
 	for i := range result {
-		byteIdx := i / 8
-		bitIdx := uint(i % 8)
-		result[i] = (data[byteIdx] & (1 << bitIdx)) != 0
+		result[i] = data[i] != 0
 	}
 	return result[:r.header.RowCount], nil
 }

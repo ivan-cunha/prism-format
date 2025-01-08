@@ -134,9 +134,9 @@ func (w *Writer) appendValue(col *ColumnBlock, value string) error {
 			return err
 		}
 		if val {
-			col.Data = append(col.Data, 1)
+			col.Data = append(col.Data, byte(1))
 		} else {
-			col.Data = append(col.Data, 0)
+			col.Data = append(col.Data, byte(0))
 		}
 
 	case types.DateType:
@@ -171,6 +171,12 @@ func (w *Writer) getCompressor(colType types.DataType) (compression.Compressor, 
 		return compressor, nil
 	case types.Int32Type, types.Int64Type:
 		compressor, err := compression.GetCompressor("delta")
+		if err != nil {
+			return compression.GetCompressor("snappy")
+		}
+		return compressor, nil
+	case types.BooleanType:
+		compressor, err := compression.GetCompressor("boolean")
 		if err != nil {
 			return compression.GetCompressor("snappy")
 		}
@@ -428,7 +434,8 @@ func (w *Writer) appendDefaultValue(col *ColumnBlock) error {
 	case types.StringType:
 		return w.appendValue(col, "")
 	case types.BooleanType:
-		return w.appendValue(col, "false")
+		col.Data = append(col.Data, byte(0))
+		return nil
 	case types.DateType, types.TimestampType:
 		return w.appendValue(col, "1970-01-01")
 	default:
