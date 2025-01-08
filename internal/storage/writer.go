@@ -122,6 +122,20 @@ func (w *Writer) appendValue(col *ColumnBlock, value string) error {
 	return nil
 }
 
+func (w *Writer) getCompressor(colType types.DataType) (compression.Compressor, error) {
+	switch colType {
+	case types.Int32Type, types.Int64Type, types.TimestampType, types.DateType:
+		compressor, err := compression.GetCompressor("delta")
+		if err != nil {
+			// Fallback to snappy
+			return compression.GetCompressor("snappy")
+		}
+		return compressor, nil
+	default:
+		return compression.GetCompressor("snappy")
+	}
+}
+
 func (w *Writer) Close() error {
 	fmt.Printf("Starting to write file with %d columns and %d rows\n", len(w.schema.Columns), w.rowCount)
 	now := time.Now().Unix()
@@ -155,14 +169,36 @@ func (w *Writer) Close() error {
 		currentOffset += int64(metadataSize + len(col.Metadata.Name))
 	}
 
+	// Pre-compress all columns and store results
+	type compressedColumn struct {
+		data []byte
+		size int64
+	}
+	compressedData := make(map[string]compressedColumn)
+
 	for _, col := range w.columns {
-		compressed, err := compression.Compress(col.Data)
+		compressor, err := w.getCompressor(col.Metadata.Type)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to get compressor for column %s: %v", col.Metadata.Name, err)
 		}
 
+		compressed, err := compressor.Compress(col.Data)
+		if err != nil {
+			return fmt.Errorf("compression failed for column %s: %v", col.Metadata.Name, err)
+		}
+
+		compressedData[col.Metadata.Name] = compressedColumn{
+			data: compressed,
+			size: int64(len(compressed)),
+		}
+	}
+
+	// Write metadata
+	for _, col := range w.columns {
+		compressed := compressedData[col.Metadata.Name]
+
 		col.Metadata.Offset = currentOffset
-		col.Metadata.CompressedSize = int64(len(compressed))
+		col.Metadata.CompressedSize = compressed.size
 		col.Metadata.Length = int64(len(col.Data))
 
 		if err := binary.Write(w.w, binary.BigEndian, uint8(col.Metadata.Type)); err != nil {
@@ -190,23 +226,19 @@ func (w *Writer) Close() error {
 			return err
 		}
 
-		currentOffset += col.Metadata.CompressedSize
+		currentOffset += compressed.size
 	}
 
+	// Write compressed data
 	for _, col := range w.columns {
-		compressed, err := compression.Compress(col.Data)
-		if err != nil {
-			return err
-		}
-
-		if _, err := w.w.Write(compressed); err != nil {
+		compressed := compressedData[col.Metadata.Name]
+		if _, err := w.w.Write(compressed.data); err != nil {
 			return err
 		}
 	}
 
 	return nil
 }
-
 func parseInt32(s string) (int32, error) {
 	i64, err := strconv.ParseInt(s, 10, 32)
 	if err != nil {
