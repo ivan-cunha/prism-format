@@ -170,9 +170,32 @@ func (r *Reader) loadColumnData(col *ColumnBlock) error {
 		return err
 	}
 
-	decompressed, err := compression.Decompress(compressed)
+	// Get appropriate decompressor based on column type
+	var compressor compression.Compressor
+	var err error
+
+	switch col.Metadata.Type {
+	case types.TimestampType, types.DateType:
+		compressor, err = compression.GetCompressor("temporal")
+		if err != nil {
+			compressor, err = compression.GetCompressor("snappy")
+		}
+	case types.Int32Type, types.Int64Type:
+		compressor, err = compression.GetCompressor("delta")
+		if err != nil {
+			compressor, err = compression.GetCompressor("snappy")
+		}
+	default:
+		compressor, err = compression.GetCompressor("snappy")
+	}
+
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get decompressor: %v", err)
+	}
+
+	decompressed, err := compressor.Decompress(compressed)
+	if err != nil {
+		return fmt.Errorf("decompression failed: %v", err)
 	}
 
 	col.Data = decompressed

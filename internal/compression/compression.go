@@ -9,6 +9,8 @@ var (
 	ErrCompressorNotFound = errors.New("compressor not found")
 	compressors           = make(map[string]Compressor)
 	compressorsMu         sync.RWMutex
+	ErrInvalidDataSize    = errors.New("invalid data size for compression")
+	ErrInvalidFormat      = errors.New("invalid compressed data format")
 )
 
 type Compressor interface {
@@ -31,20 +33,4 @@ func GetCompressor(name string) (Compressor, error) {
 		return c, nil
 	}
 	return nil, ErrCompressorNotFound
-}
-
-func Compress(data []byte) ([]byte, error) {
-	c, err := GetCompressor("snappy") // Default compressor
-	if err != nil {
-		return nil, err
-	}
-	return c.Compress(data)
-}
-
-func Decompress(data []byte) ([]byte, error) {
-	c, err := GetCompressor("snappy")
-	if err != nil {
-		return nil, err
-	}
-	return c.Decompress(data)
 }

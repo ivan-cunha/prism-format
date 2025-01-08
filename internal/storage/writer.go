@@ -124,10 +124,15 @@ func (w *Writer) appendValue(col *ColumnBlock, value string) error {
 
 func (w *Writer) getCompressor(colType types.DataType) (compression.Compressor, error) {
 	switch colType {
-	case types.Int32Type, types.Int64Type, types.TimestampType, types.DateType:
+	case types.TimestampType, types.DateType:
+		compressor, err := compression.GetCompressor("temporal")
+		if err != nil {
+			return compression.GetCompressor("snappy")
+		}
+		return compressor, nil
+	case types.Int32Type, types.Int64Type:
 		compressor, err := compression.GetCompressor("delta")
 		if err != nil {
-			// Fallback to snappy
 			return compression.GetCompressor("snappy")
 		}
 		return compressor, nil
