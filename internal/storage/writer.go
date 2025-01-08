@@ -17,10 +17,12 @@ import (
 )
 
 type Writer struct {
-	w        io.Writer
-	schema   types.Schema
-	columns  []*ColumnBlock
-	rowCount uint64
+	w          io.Writer
+	schema     types.Schema
+	columns    []*ColumnBlock
+	rowCount   uint64
+	nullBitmap []byte
+	bitmapSize uint64
 }
 
 func NewWriter(w io.Writer, schema types.Schema) *Writer {
@@ -30,9 +32,24 @@ func NewWriter(w io.Writer, schema types.Schema) *Writer {
 	}
 
 	return &Writer{
-		w:       w,
-		schema:  schema,
-		columns: columns,
+		w:          w,
+		schema:     schema,
+		columns:    columns,
+		rowCount:   0,
+		nullBitmap: make([]byte, 1024), // Initial size
+		bitmapSize: 0,
+	}
+}
+
+func (w *Writer) ensureNullBitmapCapacity(rowIndex uint64) {
+	// Calculate required size in bytes
+	requiredSize := (rowIndex/8 + 1) * uint64(len(w.schema.Columns))
+
+	// If current capacity is insufficient, grow the bitmap
+	if uint64(len(w.nullBitmap)) < requiredSize {
+		newBitmap := make([]byte, requiredSize*2) // Double the required size for future growth
+		copy(newBitmap, w.nullBitmap)
+		w.nullBitmap = newBitmap
 	}
 }
 
@@ -41,16 +58,38 @@ func (w *Writer) WriteRow(values []string) error {
 		return errors.New("value count does not match schema")
 	}
 
+	// Calculate required bitmap size for this row
+	newBitmapSize := ((w.rowCount+1)*uint64(len(w.schema.Columns)) + 7) / 8
+	if newBitmapSize > uint64(len(w.nullBitmap)) {
+		// Grow bitmap
+		newBitmap := make([]byte, newBitmapSize*2) // Double for future growth
+		copy(newBitmap, w.nullBitmap)
+		w.nullBitmap = newBitmap
+	}
+	w.bitmapSize = newBitmapSize
+
+	if w.rowCount%500000 == 0 {
+		fmt.Printf("Writing row %d...\n", w.rowCount)
+	}
+
 	for i, val := range values {
 		col := w.columns[i]
-		if err := w.appendValue(col, val); err != nil {
-			return err
+		if w.schema.Columns[i].Nullable {
+			if err := w.appendNullableValue(col, val); err != nil {
+				return err
+			}
+		} else {
+			if isNull(val) {
+				return fmt.Errorf("null value not allowed for non-nullable column %s", col.Metadata.Name)
+			}
+			if err := w.appendValue(col, val); err != nil {
+				return err
+			}
 		}
 	}
 	w.rowCount++
 	return nil
 }
-
 func (w *Writer) appendValue(col *ColumnBlock, value string) error {
 	var buf [8]byte
 	switch col.Metadata.Type {
@@ -143,14 +182,16 @@ func (w *Writer) getCompressor(colType types.DataType) (compression.Compressor, 
 
 func (w *Writer) Close() error {
 	fmt.Printf("Starting to write file with %d columns and %d rows\n", len(w.schema.Columns), w.rowCount)
+
 	now := time.Now().Unix()
 	header := encoding.FileHeader{
-		Magic:       encoding.MagicNumber,
-		Version:     encoding.Version,
-		RowCount:    w.rowCount,
-		ColumnCount: uint32(len(w.schema.Columns)),
-		Created:     now,
-		Modified:    now,
+		Magic:         encoding.MagicNumber,
+		Version:       encoding.Version,
+		RowCount:      w.rowCount,
+		ColumnCount:   uint32(len(w.schema.Columns)),
+		Created:       now,
+		Modified:      now,
+		NullBitmapLen: uint32(w.bitmapSize),
 	}
 
 	schemaJson, err := json.Marshal(w.schema)
@@ -168,7 +209,13 @@ func (w *Writer) Close() error {
 		return fmt.Errorf("failed to write schema: %v", err)
 	}
 
-	currentOffset := int64(binary.Size(header) + len(schemaJson))
+	fmt.Printf("Writing null bitmap (length=%d)\n", w.bitmapSize)
+	if _, err := w.w.Write(w.nullBitmap[:w.bitmapSize]); err != nil {
+		return fmt.Errorf("failed to write null bitmap: %v", err)
+	}
+
+	// Start metadata section after header + schema + nullBitmap
+	currentOffset := int64(binary.Size(header) + len(schemaJson) + len(w.nullBitmap))
 	metadataSize := 8 + 4 + 8 + 8 + 8 + 8
 	for _, col := range w.columns {
 		currentOffset += int64(metadataSize + len(col.Metadata.Name))
@@ -244,6 +291,7 @@ func (w *Writer) Close() error {
 
 	return nil
 }
+
 func parseInt32(s string) (int32, error) {
 	i64, err := strconv.ParseInt(s, 10, 32)
 	if err != nil {
@@ -339,4 +387,51 @@ func float32ToBits(f float32) uint32 {
 
 func float64ToBits(f float64) uint64 {
 	return math.Float64bits(f)
+}
+
+func (w *Writer) appendNullableValue(col *ColumnBlock, value string) error {
+	colIndex := 0
+	for i, c := range w.schema.Columns {
+		if c.Name == col.Metadata.Name {
+			colIndex = i
+			break
+		}
+	}
+
+	byteIndex := (w.rowCount*uint64(len(w.schema.Columns)) + uint64(colIndex)) / 8
+	bitIndex := (w.rowCount*uint64(len(w.schema.Columns)) + uint64(colIndex)) % 8
+
+	if isNull(value) {
+		w.nullBitmap[byteIndex] |= (1 << bitIndex)
+		return w.appendDefaultValue(col)
+	}
+
+	w.nullBitmap[byteIndex] &^= (1 << bitIndex)
+	return w.appendValue(col, value)
+}
+
+func isNull(value string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	return v == "" || v == "null" || v == "na" || v == "n/a"
+}
+
+func (w *Writer) appendDefaultValue(col *ColumnBlock) error {
+	switch col.Metadata.Type {
+	case types.Int32Type:
+		return w.appendValue(col, "0")
+	case types.Int64Type:
+		return w.appendValue(col, "0")
+	case types.Float32Type:
+		return w.appendValue(col, "0.0")
+	case types.Float64Type:
+		return w.appendValue(col, "0.0")
+	case types.StringType:
+		return w.appendValue(col, "")
+	case types.BooleanType:
+		return w.appendValue(col, "false")
+	case types.DateType, types.TimestampType:
+		return w.appendValue(col, "1970-01-01")
+	default:
+		return fmt.Errorf("unsupported type for null value")
+	}
 }

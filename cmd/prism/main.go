@@ -93,10 +93,10 @@ func convertCSVToPrism(input, output string) error {
 		return fmt.Errorf("invalid headers: %v", err)
 	}
 
-	// Infer column types with retry logic
-	columnTypes, err := storage.InferColumnTypesWithRetry(csvFile)
+	// Infer column details with retry logic
+	columns, err := storage.InferColumnDetailsWithRetry(csvFile)
 	if err != nil {
-		return fmt.Errorf("error inferring column types: %v", err)
+		return fmt.Errorf("error inferring column details: %v", err)
 	}
 
 	// Reset file position for reading data
@@ -104,10 +104,10 @@ func convertCSVToPrism(input, output string) error {
 		return fmt.Errorf("error resetting file position: %v", err)
 	}
 
-	// Create schema with inferred types
+	// Create schema with inferred types and nullability
 	fileSchema := schema.New()
-	for i, header := range headers {
-		if err := fileSchema.AddColumn(header, columnTypes[i], true); err != nil {
+	for _, col := range columns {
+		if err := fileSchema.AddColumn(col.Name, col.Type, col.Nullable); err != nil {
 			return fmt.Errorf("error adding column: %v", err)
 		}
 	}

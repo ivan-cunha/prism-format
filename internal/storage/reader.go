@@ -35,10 +35,11 @@ var (
 )
 
 type Reader struct {
-	r       io.ReadSeeker
-	header  encoding.FileHeader
-	schema  types.Schema
-	columns map[string]*ColumnBlock
+	r          io.ReadSeeker
+	header     encoding.FileHeader
+	schema     types.Schema
+	columns    map[string]*ColumnBlock
+	nullBitmap []byte
 }
 
 func NewReader(r io.ReadSeeker) (*Reader, error) {
@@ -48,23 +49,29 @@ func NewReader(r io.ReadSeeker) (*Reader, error) {
 	}
 
 	fmt.Println("Reading file header...")
-	if err := reader.readHeader(); err != nil {
+	header, err := encoding.ReadHeader(r)
+	if err != nil {
 		return nil, fmt.Errorf("failed to read header: %v", err)
 	}
+	reader.header = header
 
 	fmt.Printf("Reading schema (length=%d)...\n", reader.header.SchemaLen)
-	if err := reader.readSchema(); err != nil {
+	schemaBytes := make([]byte, reader.header.SchemaLen)
+	if _, err := io.ReadFull(r, schemaBytes); err != nil {
 		return nil, fmt.Errorf("failed to read schema: %v", err)
+	}
+	if err := reader.schema.UnmarshalJSON(schemaBytes); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal schema: %v", err)
+	}
+
+	// Read null bitmap
+	fmt.Printf("Reading null bitmap (length=%d)...\n", reader.header.NullBitmapLen)
+	reader.nullBitmap = make([]byte, reader.header.NullBitmapLen)
+	if _, err := io.ReadFull(r, reader.nullBitmap); err != nil {
+		return nil, fmt.Errorf("failed to read null bitmap: %v", err)
 	}
 
 	fmt.Printf("Reading column metadata for %d columns...\n", len(reader.schema.Columns))
-
-	// Get current position
-	pos, err := r.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current position: %v", err)
-	}
-	fmt.Printf("Starting to read column metadata at position: %d\n", pos)
 	if err := reader.readColumnMetadata(); err != nil {
 		return nil, fmt.Errorf("failed to read column metadata: %v", err)
 	}
@@ -99,7 +106,13 @@ func (r *Reader) readSchema() error {
 	return r.schema.UnmarshalJSON(schemaBytes)
 }
 
+func getCurrentOffset(r io.ReadSeeker) int64 {
+	offset, _ := r.Seek(0, io.SeekCurrent)
+	return offset
+}
+
 func (r *Reader) readColumnMetadata() error {
+	fmt.Printf("Starting to read metadata at offset %d\n", getCurrentOffset(r.r))
 	for _, col := range r.schema.Columns {
 		var metadata ColumnMetadata
 
@@ -137,10 +150,80 @@ func (r *Reader) readColumnMetadata() error {
 
 		r.columns[col.Name] = &ColumnBlock{
 			Metadata: metadata,
-			Data:     nil, // Data loaded on demand
+			Data:     nil,
 		}
 	}
 	return nil
+}
+
+func (r *Reader) wrapWithNullable(values interface{}) (interface{}, error) {
+	switch v := values.(type) {
+	case []int32:
+		result := make([]types.NullableValue, len(v))
+		for i, val := range v {
+			result[i] = types.NullableValue{
+				Value: val,
+				Valid: !r.isNull(uint64(i)),
+			}
+		}
+		return result, nil
+	case []int64:
+		result := make([]types.NullableValue, len(v))
+		for i, val := range v {
+			result[i] = types.NullableValue{
+				Value: val,
+				Valid: !r.isNull(uint64(i)),
+			}
+		}
+		return result, nil
+	case []float32:
+		result := make([]types.NullableValue, len(v))
+		for i, val := range v {
+			result[i] = types.NullableValue{
+				Value: val,
+				Valid: !r.isNull(uint64(i)),
+			}
+		}
+		return result, nil
+	case []float64:
+		result := make([]types.NullableValue, len(v))
+		for i, val := range v {
+			result[i] = types.NullableValue{
+				Value: val,
+				Valid: !r.isNull(uint64(i)),
+			}
+		}
+		return result, nil
+	case []string:
+		result := make([]types.NullableValue, len(v))
+		for i, val := range v {
+			result[i] = types.NullableValue{
+				Value: val,
+				Valid: !r.isNull(uint64(i)),
+			}
+		}
+		return result, nil
+	case []bool:
+		result := make([]types.NullableValue, len(v))
+		for i, val := range v {
+			result[i] = types.NullableValue{
+				Value: val,
+				Valid: !r.isNull(uint64(i)),
+			}
+		}
+		return result, nil
+	case []time.Time:
+		result := make([]types.NullableValue, len(v))
+		for i, val := range v {
+			result[i] = types.NullableValue{
+				Value: val,
+				Valid: !r.isNull(uint64(i)),
+			}
+		}
+		return result, nil
+	default:
+		return nil, fmt.Errorf("unsupported type for nullable wrapping: %T", values)
+	}
 }
 
 func (r *Reader) ReadColumn(name string) (interface{}, error) {
@@ -153,7 +236,30 @@ func (r *Reader) ReadColumn(name string) (interface{}, error) {
 		return nil, err
 	}
 
-	return r.decodeColumn(col)
+	// Get the column's schema to check if it's nullable
+	var colSchema *types.Column
+	for _, c := range r.schema.Columns {
+		if c.Name == name {
+			colSchema = &c
+			break
+		}
+	}
+	if colSchema == nil {
+		return nil, fmt.Errorf("column %s not found in schema", name)
+	}
+
+	// If column is not nullable, just decode normally
+	if !colSchema.Nullable {
+		return r.decodeColumn(col)
+	}
+
+	// For nullable columns, wrap values in NullableValue structs
+	rawValues, err := r.decodeColumn(col)
+	if err != nil {
+		return nil, err
+	}
+
+	return r.wrapWithNullable(rawValues)
 }
 
 func (r *Reader) loadColumnData(col *ColumnBlock) error {
@@ -170,7 +276,6 @@ func (r *Reader) loadColumnData(col *ColumnBlock) error {
 		return err
 	}
 
-	// Get appropriate decompressor based on column type
 	var compressor compression.Compressor
 	var err error
 
@@ -258,11 +363,8 @@ func (r *Reader) decodeFloat64(data []byte) ([]float64, error) {
 }
 
 func (r *Reader) decodeString(data []byte) ([]string, error) {
-	// First read dictionary
 	dictLen := binary.BigEndian.Uint32(data[:4])
 	data = data[4:]
-
-	// Read dictionary strings
 	dict := make([]string, dictLen)
 	offset := 0
 	for i := uint32(0); i < dictLen; i++ {
@@ -272,13 +374,11 @@ func (r *Reader) decodeString(data []byte) ([]string, error) {
 		offset += int(strLen)
 	}
 
-	// Read indexes
 	indexes := make([]uint32, (len(data)-offset)/4)
 	for i := range indexes {
 		indexes[i] = binary.BigEndian.Uint32(data[offset+i*4:])
 	}
 
-	// Convert indexes to strings
 	result := make([]string, len(indexes))
 	for i, idx := range indexes {
 		if idx >= dictLen {
@@ -320,4 +420,10 @@ func float32FromBits(bits uint32) float32 {
 
 func float64FromBits(bits uint64) float64 {
 	return float64(bits)
+}
+
+func (r *Reader) isNull(rowIndex uint64) bool {
+	byteIndex := rowIndex / 8
+	bitIndex := rowIndex % 8
+	return (r.nullBitmap[byteIndex] & (1 << bitIndex)) != 0
 }

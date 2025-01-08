@@ -43,3 +43,8 @@ func (s Schema) MarshalJSON() ([]byte, error) {
 func (s *Schema) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, &s.Columns)
 }
+
+type NullableValue struct {
+	Value interface{}
+	Valid bool
+}

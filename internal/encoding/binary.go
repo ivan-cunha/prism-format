@@ -12,13 +12,14 @@ const (
 )
 
 type FileHeader struct {
-	Magic       uint32
-	Version     uint16
-	SchemaLen   uint32
-	RowCount    uint64
-	ColumnCount uint32
-	Created     int64
-	Modified    int64
+	Magic         uint32
+	Version       uint16
+	SchemaLen     uint32
+	RowCount      uint64
+	ColumnCount   uint32
+	Created       int64
+	Modified      int64
+	NullBitmapLen uint32
 }
 
 func WriteHeader(w io.Writer, header FileHeader) error {

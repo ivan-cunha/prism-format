@@ -12,14 +12,13 @@ import (
 
 const sampleSize = 100
 
-// TypeInference holds the state of type inference for a column
 type TypeInference struct {
 	possibleTypes map[types.DataType]bool
 	nullCount     int
 	sampleCount   int
+	nullable      bool
 }
 
-// InferColumnTypes reads the CSV with proper configuration and determines types
 func InferColumnTypes(r io.ReadSeeker) ([]types.DataType, error) {
 	// Configure CSV reader with proper settings
 	reader := csv.NewReader(r)
@@ -44,10 +43,11 @@ func InferColumnTypes(r io.ReadSeeker) ([]types.DataType, error) {
 				types.Float64Type:   true,
 				types.DateType:      true,
 				types.TimestampType: true,
-				types.StringType:    true, // Always possible as fallback
+				types.StringType:    true,
 			},
 			nullCount:   0,
 			sampleCount: 0,
+			nullable:    false,
 		}
 	}
 
@@ -58,7 +58,6 @@ func InferColumnTypes(r io.ReadSeeker) ([]types.DataType, error) {
 			break
 		}
 		if err != nil {
-			// If it's a quote-related error, try with more permissive settings
 			if strings.Contains(err.Error(), "quote") {
 				reader.LazyQuotes = true
 				continue
@@ -77,10 +76,72 @@ func InferColumnTypes(r io.ReadSeeker) ([]types.DataType, error) {
 		return nil, err
 	}
 
-	return finalizeTypes(inferences), nil
+	columns := finalizeTypes(inferences, headers)
+	dataTypes := make([]types.DataType, len(columns))
+	for i, col := range columns {
+		dataTypes[i] = col.Type
+	}
+
+	return dataTypes, nil
 }
 
-// InferColumnTypesWithRetry attempts type inference with progressively more permissive settings
+func InferColumnDetails(r io.ReadSeeker) ([]types.Column, error) {
+	// This contains the full inference logic that returns Column structs
+	// The implementation is the same as what we had in the previous InferColumnTypes
+	// but keeps the Column struct return type
+	reader := csv.NewReader(r)
+	reader.LazyQuotes = true
+	reader.TrimLeadingSpace = true
+
+	headers, err := reader.Read()
+	if err != nil {
+		return nil, fmt.Errorf("error reading header: %v", err)
+	}
+
+	inferences := make([]TypeInference, len(headers))
+	for i := range inferences {
+		inferences[i] = TypeInference{
+			possibleTypes: map[types.DataType]bool{
+				types.BooleanType:   true,
+				types.Int32Type:     true,
+				types.Int64Type:     true,
+				types.Float32Type:   true,
+				types.Float64Type:   true,
+				types.DateType:      true,
+				types.TimestampType: true,
+				types.StringType:    true,
+			},
+			nullCount:   0,
+			sampleCount: 0,
+			nullable:    false,
+		}
+	}
+
+	for i := 0; i < sampleSize; i++ {
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if strings.Contains(err.Error(), "quote") {
+				reader.LazyQuotes = true
+				continue
+			}
+			return nil, err
+		}
+
+		for j, value := range row {
+			analyzeValue(&inferences[j], value)
+		}
+	}
+
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+
+	return finalizeTypes(inferences, headers), nil
+}
+
 func InferColumnTypesWithRetry(r io.ReadSeeker) ([]types.DataType, error) {
 	// First attempt with standard settings
 	types, err := InferColumnTypes(r)
@@ -102,13 +163,36 @@ func InferColumnTypesWithRetry(r io.ReadSeeker) ([]types.DataType, error) {
 	return InferColumnTypes(r)
 }
 
+func InferColumnDetailsWithRetry(r io.ReadSeeker) ([]types.Column, error) {
+	// First attempt with standard settings
+	columns, err := InferColumnDetails(r)
+	if err == nil {
+		return columns, nil
+	}
+
+	// Reset position for retry
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+
+	// Retry with more permissive CSV reader settings
+	reader := csv.NewReader(r)
+	reader.LazyQuotes = true
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1 // Allow variable number of fields
+
+	return InferColumnDetails(r)
+}
+
 func analyzeValue(inference *TypeInference, value string) {
 	inference.sampleCount++
 	value = strings.TrimSpace(value)
 
 	// Check for null/empty values
-	if value == "" || strings.ToLower(value) == "null" || strings.ToLower(value) == "na" {
+	if value == "" || strings.ToLower(value) == "null" ||
+		strings.ToLower(value) == "na" || strings.ToLower(value) == "n/a" {
 		inference.nullCount++
+		inference.nullable = true // Mark as nullable when we find a null
 		return
 	}
 
@@ -161,8 +245,8 @@ func analyzeValue(inference *TypeInference, value string) {
 	}
 }
 
-func finalizeTypes(inferences []TypeInference) []types.DataType {
-	result := make([]types.DataType, len(inferences))
+func finalizeTypes(inferences []TypeInference, headers []string) []types.Column {
+	result := make([]types.Column, len(inferences))
 
 	typeOrder := []types.DataType{
 		types.BooleanType,
@@ -176,23 +260,21 @@ func finalizeTypes(inferences []TypeInference) []types.DataType {
 	}
 
 	for i, inf := range inferences {
-		// Default to string type
-		result[i] = types.StringType
+		// Create the column with name from headers
+		result[i] = types.Column{
+			Name: headers[i],
+			Type: types.StringType, // Default to string
+		}
 
 		// Select the most specific type that's still possible
 		for _, t := range typeOrder {
 			if inf.possibleTypes[t] {
-				result[i] = t
+				result[i].Type = t
 				break
 			}
 		}
 
-		// If more than 90% of values are null, make it nullable
-		nullRatio := float64(inf.nullCount) / float64(inf.sampleCount)
-		if nullRatio > 0.9 {
-			// You might want to add a SetNullable method to your schema
-			// or handle this at a higher level
-		}
+		result[i].Nullable = inf.nullable
 	}
 
 	return result
@@ -231,13 +313,16 @@ func ConvertWithRetry(reader io.ReadSeeker, writer *Writer, schema types.Schema)
 		if !ok {
 			return result.Error
 		}
-
-		// Fall back to string type for the problematic column
-		fmt.Printf("Warning: Column '%s' contains mixed types, falling back to string type\n",
-			convErr.ColumnName)
-
-		// Update schema for the problematic column
-		schema.Columns[convErr.ColumnIndex].Type = types.StringType
+		if isNull(convErr.Value) && !schema.Columns[convErr.ColumnIndex].Nullable {
+			fmt.Printf("Warning: Found null value in non-nullable column '%s', converting to nullable\n",
+				convErr.ColumnName)
+			schema.Columns[convErr.ColumnIndex].Nullable = true
+		} else {
+			// If it's not a null value issue, fall back to string type
+			fmt.Printf("Warning: Column '%s' contains mixed types, falling back to string type\n",
+				convErr.ColumnName)
+			schema.Columns[convErr.ColumnIndex].Type = types.StringType
+		}
 
 		// Reset reader position
 		if _, err := reader.Seek(0, io.SeekStart); err != nil {
